@@ -1,12 +1,10 @@
 package peerpal.ui;
 
 import peerpal.dao.ActivityLogDao;
-import peerpal.dao.TutoringSessionDao;
 import peerpal.dao.UserDao;
 import peerpal.model.ActivityLog;
 import peerpal.model.Role;
 import peerpal.model.User;
-import peerpal.ui.RoleMenu;
 
 import java.util.List;
 import java.util.Scanner;
@@ -14,16 +12,18 @@ import java.util.Scanner;
 /**
  * Dashboard shown to users with the ADMIN role after successful login.
  * Lets the administrator review accounts, approve pending registrations,
- * update the role and status of other users, and inspect the system audit trail.
+ * update the role and status of other users, and review the system audit logs.
  */
 public class AdminMenu extends RoleMenu {
 
     /** Statuses an account is allowed to have. */
     private static final String[] VALID_STATUSES = {"APPROVED", "PENDING"};
 
-    public AdminMenu(User user, Scanner scanner, UserDao userDao,
-                     ActivityLogDao logDao, TutoringSessionDao sessionDao) {
-        super(user, scanner, userDao, logDao, sessionDao);
+    private final ActivityLogDao activityLogDao;
+
+    public AdminMenu(User user, Scanner scanner, UserDao userDao, ActivityLogDao activityLogDao) {
+        super(user, scanner, userDao);
+        this.activityLogDao = activityLogDao;
     }
 
     @Override
@@ -43,7 +43,7 @@ public class AdminMenu extends RoleMenu {
             System.out.println("2. View pending registrations");
             System.out.println("3. Approve user account");
             System.out.println("4. Update user role and status");
-            System.out.println("5. View system audit logs");
+            System.out.println("5. View System Audit Logs");
             System.out.println("6. Logout");
             System.out.print("Choose: ");
 
@@ -107,7 +107,9 @@ public class AdminMenu extends RoleMenu {
             return;
         }
 
-        if (userDao.approveUser(targetId, user.id())) {
+        if (userDao.approveUser(targetId)) {
+            activityLogDao.logAction(user.id(), "USER_APPROVED",
+                    "Admin [" + user.id() + "] approved account for User ID " + targetId);
             System.out.println("User ID " + targetId + " has been APPROVED.");
         } else {
             System.out.println("Approval failed. Please try again.");
@@ -170,7 +172,10 @@ public class AdminMenu extends RoleMenu {
         }
 
         // Step 4: save to the database
-        if (userDao.updateUserRoleAndStatus(target.id(), newRole, newStatus, user.id())) {
+        if (userDao.updateUserRoleAndStatus(target.id(), newRole, newStatus)) {
+            activityLogDao.logAction(user.id(), "USER_UPDATED",
+                    "Admin [" + user.id() + "] changed role of User " + target.id()
+                            + " to " + newRole + " and status to " + newStatus);
             System.out.println("SUCCESS: User '" + target.username() + "' (ID " + target.id()
                     + ") is now " + newRole + " / " + newStatus + ".");
         } else {
@@ -179,13 +184,13 @@ public class AdminMenu extends RoleMenu {
     }
 
     // ------------------------------------------------------------------
-    // Audit log (activity_logs)
+    // System audit logs
     // ------------------------------------------------------------------
 
-    /** Sub-menu: view all logs, filter by user ID, or clear the log history. */
+    /** Sub-menu for the audit trail: view all, filter by user, or clear. */
     private void auditLogMenu() {
-        boolean back = false;
-        while (!back) {
+        boolean inAuditMenu = true;
+        while (inAuditMenu) {
             System.out.println();
             System.out.println("--- System Audit Logs ---");
             System.out.println("1. View all system logs");
@@ -195,16 +200,19 @@ public class AdminMenu extends RoleMenu {
             System.out.print("Choose: ");
 
             switch (scanner.nextLine().trim()) {
-                case "1" -> printLogTable(logDao.getAllLogs());
+                case "1" -> {
+                    System.out.println("\n--- All System Logs ---");
+                    printLogTable(activityLogDao.getAllLogs());
+                }
                 case "2" -> filterLogsByUser();
                 case "3" -> clearLogs();
-                case "0" -> back = true;
+                case "0" -> inAuditMenu = false;
                 default -> System.out.println("Invalid choice. Please try again.");
             }
         }
     }
 
-    /** Asks for a user ID (re-prompts on non-numeric input; 0 cancels) and shows that user's logs. */
+    /** Asks for a User ID (0 cancels) and prints only that user's logs. */
     private void filterLogsByUser() {
         int userId = readIntInput("Enter the User ID to filter by (0 to cancel): ");
         if (userId == 0) {
@@ -212,75 +220,66 @@ public class AdminMenu extends RoleMenu {
             return;
         }
         System.out.println("\n--- Logs for User ID " + userId + " ---");
-        printLogTable(logDao.getLogsByUserId(userId));
+        printLogTable(activityLogDao.getLogsByUserId(userId));
     }
 
     /**
-     * Deletes the whole log history, but only after the admin types YES.
-     * The clearing itself is then recorded as a fresh LOGS_CLEARED entry,
-     * so the audit trail is never silently emptied.
+     * Deletes all log entries, but only after the admin types YES.
+     * The clearing itself is then recorded as the first new log entry,
+     * so the audit trail never silently loses its history.
      */
     private void clearLogs() {
-        int total = logDao.getAllLogs().size();
-        if (total == 0) {
-            System.out.println("There are no logs to clear.");
-            return;
-        }
-
-        System.out.println("WARNING: This permanently deletes all " + total + " log entries.");
+        System.out.println("\nWARNING: This permanently deletes ALL audit log entries.");
         System.out.print("Type YES to confirm (anything else cancels): ");
         if (!scanner.nextLine().trim().equals("YES")) {
             System.out.println("Clear cancelled. No logs were deleted.");
             return;
         }
 
-        int deleted = logDao.clearAllLogs();
-        logDao.logAction(user.id(), "LOGS_CLEARED",
-                "Admin [" + user.id() + "] cleared " + deleted + " log entries.");
-        System.out.println(deleted + " log entries cleared.");
+        int removed = activityLogDao.clearLogs();
+        activityLogDao.logAction(user.id(), "LOGS_CLEARED",
+                "Admin [" + user.id() + "] cleared " + removed + " audit log entries");
+        System.out.println(removed + " log entries deleted.");
     }
 
     /**
-     * Prints logs in an aligned console table. A description longer than its
-     * column is word-wrapped onto extra lines so the columns always stay aligned.
+     * Prints logs in an aligned console table.
+     * Long descriptions wrap onto extra lines so no detail is cut off.
      */
     static void printLogTable(List<ActivityLog> logs) {
-        final int descWidth = 35;
         String rowFormat = "%-5s | %-8s | %-18s | %-35s | %-20s%n";
-        String line = "-".repeat(5) + "-+-" + "-".repeat(8) + "-+-" + "-".repeat(18)
-                + "-+-" + "-".repeat(descWidth) + "-+-" + "-".repeat(20);
+        String border = "-".repeat(5 + 3 + 8 + 3 + 18 + 3 + 35 + 3 + 20);
 
-        System.out.println();
+        System.out.println(border);
         System.out.printf(rowFormat, "ID", "User ID", "Action Type", "Description", "Timestamp");
-        System.out.println(line);
+        System.out.println(border);
 
         if (logs.isEmpty()) {
-            System.out.println("No log entries found.");
+            System.out.println("No logs found.");
         } else {
             for (ActivityLog log : logs) {
-                List<String> parts = wrap(log.description(), descWidth);
+                List<String> lines = wrap(log.description(), 35);
                 System.out.printf(rowFormat, log.id(), log.userId(), log.actionType(),
-                        parts.get(0), log.timestamp());
-                // Continuation lines for long descriptions
-                for (int i = 1; i < parts.size(); i++) {
-                    System.out.printf(rowFormat, "", "", "", parts.get(i), "");
+                        lines.get(0), log.timestamp());
+                for (int i = 1; i < lines.size(); i++) {
+                    System.out.printf(rowFormat, "", "", "", lines.get(i), "");
                 }
             }
         }
-        System.out.println(line);
+        System.out.println(border);
         System.out.println("Total: " + logs.size());
     }
 
-    /** Splits text into lines of at most 'width' characters, breaking at spaces where possible. */
+    /** Splits text into lines of at most 'width' characters, breaking at spaces when possible. */
     private static List<String> wrap(String text, int width) {
         List<String> lines = new java.util.ArrayList<>();
-        String rest = text.trim();
+        String rest = text == null ? "" : text.trim();
         while (rest.length() > width) {
             int cut = rest.lastIndexOf(' ', width);
             if (cut <= 0) {
-                cut = width; // no space to break at: hard cut
+                cut = width;
             }
-            lines.add(rest.substring(0, cut));
+            lines.add(rest.substring(0, cut).trim());
             rest = rest.substring(cut).trim();
         }
         lines.add(rest);
@@ -290,6 +289,22 @@ public class AdminMenu extends RoleMenu {
     // ------------------------------------------------------------------
     // Input validation wrappers
     // ------------------------------------------------------------------
+
+    /**
+     * Asks for a whole number and keeps asking until one is typed.
+     * Letters or symbols never crash the program; they just re-prompt.
+     */
+    private int readIntInput(String prompt) {
+        while (true) {
+            System.out.print(prompt);
+            String input = scanner.nextLine().trim();
+            try {
+                return Integer.parseInt(input);
+            } catch (NumberFormatException e) {
+                System.out.println("Invalid input. Please enter a number (digits only).");
+            }
+        }
+    }
 
     /**
      * Asks for a role until a valid one (see the Role enum, e.g. STUDENT,

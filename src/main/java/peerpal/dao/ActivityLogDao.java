@@ -1,6 +1,5 @@
 package peerpal.dao;
 
-import peerpal.dao.DatabaseConnection;
 import peerpal.model.ActivityLog;
 
 import java.sql.Connection;
@@ -11,19 +10,18 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * All SQL queries related to the activity_logs table (the audit trail).
- * Every statement is a parameterized PreparedStatement.
+ * All SQL queries related to the activity_logs table (the system audit trail).
  */
 public class ActivityLogDao {
 
-    private static final String SELECT_LOGS =
+    private static final String SELECT_COLUMNS =
             "SELECT id, user_id, action_type, description, timestamp FROM activity_logs ";
 
     /**
-     * Inserts one audit entry. The timestamp is filled in by the database.
-     *
-     * Logging must never break the action being logged, so a failure here is
-     * reported on System.err instead of being thrown to the caller.
+     * Records one action in the audit trail.
+     * The timestamp is filled in by the database (local time).
+     * A logging failure never crashes the app: the action already happened,
+     * so a warning is printed instead.
      */
     public void logAction(int userId, String actionType, String description) {
         String sql = "INSERT INTO activity_logs (user_id, action_type, description) VALUES (?, ?, ?)";
@@ -35,54 +33,60 @@ public class ActivityLogDao {
             ps.setString(3, description);
             ps.executeUpdate();
         } catch (SQLException e) {
-            System.err.println("WARNING: could not write audit log (" + actionType + "): " + e.getMessage());
+            System.err.println("WARNING: Could not write to the audit log: " + e.getMessage());
         }
     }
 
     /** Returns every log entry, newest first. */
     public List<ActivityLog> getAllLogs() {
-        return queryLogs(SELECT_LOGS + "ORDER BY timestamp DESC, id DESC", null);
+        String sql = SELECT_COLUMNS + "ORDER BY timestamp DESC, id DESC";
+
+        try (Connection conn = DatabaseConnection.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            return mapRows(rs);
+        } catch (SQLException e) {
+            throw new RuntimeException("Could not load logs: " + e.getMessage(), e);
+        }
     }
 
     /** Returns the log entries of one user, newest first. */
     public List<ActivityLog> getLogsByUserId(int userId) {
-        return queryLogs(SELECT_LOGS + "WHERE user_id = ? ORDER BY timestamp DESC, id DESC", userId);
+        String sql = SELECT_COLUMNS + "WHERE user_id = ? ORDER BY timestamp DESC, id DESC";
+
+        try (Connection conn = DatabaseConnection.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setInt(1, userId);
+            try (ResultSet rs = ps.executeQuery()) {
+                return mapRows(rs);
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Could not load logs: " + e.getMessage(), e);
+        }
     }
 
-    /** Deletes every log entry. Returns how many rows were removed. */
-    public int clearAllLogs() {
+    /** Deletes all log entries. Returns how many rows were removed. */
+    public int clearLogs() {
         String sql = "DELETE FROM activity_logs";
 
         try (Connection conn = DatabaseConnection.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             return ps.executeUpdate();
         } catch (SQLException e) {
-            throw new RuntimeException("Clearing logs failed: " + e.getMessage(), e);
+            throw new RuntimeException("Could not clear logs: " + e.getMessage(), e);
         }
     }
 
-    /** Runs a SELECT (optionally with one int parameter) and maps each row to an ActivityLog. */
-    private List<ActivityLog> queryLogs(String sql, Integer userId) {
+    private List<ActivityLog> mapRows(ResultSet rs) throws SQLException {
         List<ActivityLog> logs = new ArrayList<>();
-
-        try (Connection conn = DatabaseConnection.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            if (userId != null) {
-                ps.setInt(1, userId);
-            }
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    logs.add(new ActivityLog(
-                            rs.getInt("id"),
-                            rs.getInt("user_id"),
-                            rs.getString("action_type"),
-                            rs.getString("description"),
-                            rs.getString("timestamp")));
-                }
-            }
-            return logs;
-        } catch (SQLException e) {
-            throw new RuntimeException("Fetching logs failed: " + e.getMessage(), e);
+        while (rs.next()) {
+            logs.add(new ActivityLog(
+                    rs.getInt("id"),
+                    rs.getInt("user_id"),
+                    rs.getString("action_type"),
+                    rs.getString("description"),
+                    rs.getString("timestamp")));
         }
+        return logs;
     }
 }

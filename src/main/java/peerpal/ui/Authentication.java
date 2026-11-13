@@ -1,14 +1,9 @@
 package peerpal.ui;
 
 import peerpal.dao.ActivityLogDao;
-import peerpal.dao.TutoringSessionDao;
 import peerpal.dao.UserDao;
 import peerpal.model.Role;
 import peerpal.model.User;
-import peerpal.ui.AdminMenu;
-import peerpal.ui.StudentMenu;
-import peerpal.ui.TeacherMenu;
-import peerpal.ui.TutorMenu;
 
 import java.util.Optional;
 import java.util.Scanner;
@@ -22,15 +17,12 @@ public class Authentication {
 
     private final Scanner scanner;
     private final UserDao userDao;
-    private final ActivityLogDao logDao;
-    private final TutoringSessionDao sessionDao;
+    private final ActivityLogDao activityLogDao;
 
-    public Authentication(Scanner scanner, UserDao userDao,
-                          ActivityLogDao logDao, TutoringSessionDao sessionDao) {
+    public Authentication(Scanner scanner, UserDao userDao, ActivityLogDao activityLogDao) {
         this.scanner = scanner;
         this.userDao = userDao;
-        this.logDao = logDao;
-        this.sessionDao = sessionDao;
+        this.activityLogDao = activityLogDao;
     }
 
     /**
@@ -106,6 +98,9 @@ public class Authentication {
         String role = selected.name();
 
         if (userDao.register(username, password, role)) {
+            int newUserId = userDao.getUserIdByUsername(username);
+            activityLogDao.logAction(newUserId, "USER_REGISTERED",
+                    "User [" + newUserId + "] registered as " + role + " (status PENDING)");
             System.out.println("Account created! Role: " + role + " | Status: PENDING");
             System.out.println("(Your account is waiting for approval.)");
         } else {
@@ -125,20 +120,13 @@ public class Authentication {
 
         if (result.isPresent()) {
             User user = result.get();
-            logDao.logAction(user.id(), "USER_LOGIN",
-                    "User " + user.username() + " (ID: " + user.id() + ") logged in.");
-            // Route to the correct role-based menu; returns when the user logs out
+            activityLogDao.logAction(user.id(), "USER_LOGIN",
+                    "User [" + user.id() + "] logged in as " + user.roles());
+            // Route to the correct role-based menu
             routeByRole(user);
-            logout(user);
         } else {
             System.out.println("Invalid username or password.");
         }
-    }
-
-    /** Records the logout once the user's dashboard has closed. */
-    private void logout(User user) {
-        logDao.logAction(user.id(), "USER_LOGOUT",
-                "User " + user.username() + " (ID: " + user.id() + ") logged out.");
     }
 
     /**
@@ -152,10 +140,10 @@ public class Authentication {
             return;
         }
         switch (role.get()) {
-            case TEACHER -> new TeacherMenu(user, scanner, userDao, logDao, sessionDao).show();
-            case STUDENT -> new StudentMenu(user, scanner, userDao, logDao, sessionDao).show();
-            case TUTOR -> new TutorMenu(user, scanner, userDao, logDao, sessionDao).show();
-            case ADMIN -> new AdminMenu(user, scanner, userDao, logDao, sessionDao).show();
+            case TEACHER -> new TeacherMenu(user, scanner, userDao).show();
+            case STUDENT -> new StudentMenu(user, scanner, userDao).show();
+            case TUTOR -> new TutorMenu(user, scanner, userDao).show();
+            case ADMIN -> new AdminMenu(user, scanner, userDao, activityLogDao).show();
         }
     }
 }
